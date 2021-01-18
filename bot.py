@@ -2,7 +2,8 @@
 import discord
 import datetime as dt
 import os
-import psycopg2 as p
+import asyncio as aio
+import asyncpg as apg
 
 from dotenv import load_dotenv
 from discord.ext import commands
@@ -17,11 +18,12 @@ HOST = os.getenv('HOST')
 PORT = os.getenv('PORT')
 DATABASE = os.getenv('DATABASE')
 
+
 #Set bot prefix
 bot = commands.Bot(command_prefix="t")
 
 
-#Print in console that the bot is online
+#Print in console that the bot is online as a visual check for when commands can be processed
 @bot.event
 async def on_ready():
     print(f'{bot.user.name} is online')
@@ -33,18 +35,6 @@ async def ping(ctx):
     await ctx.send(f'Pong! {round(bot.latency*1000)}')
 
 
-#Unused commond to verify user information
-'''
-@bot.command()
-async def info(ctx):
-    did = ctx.author.id
-    info = ctx.author.name
-    dis = ctx.author.discriminator
-    
-    await ctx.send(f"User info is ID:{did}, name:{info} and dis:{dis}")
-'''
-
-
 #Add new users to the database
 @bot.command(aliases=['register'])
 async def signup(ctx):
@@ -52,42 +42,103 @@ async def signup(ctx):
     user_id = ctx.author.id
     name = ctx.author.name
     dis = ctx.author.discriminator
+    # Connect to database
+    conn = await apg.connect(user= USER, password= PASSWORD, host= HOST, port=PORT, database=DATABASE, ssl='require')
 
-    #Try to connect to the database and run SQL commands
+    # Try to get user information. If information is returned, print else alert user they are not part of the database
     try:
-        #Connection Information
-        connection = p.connect( user= USER,
-                                password= PASSWORD,
-                                host= HOST,
-                                port=PORT,
-                                database=DATABASE)
-        #Create the database cursor
-        cursor = connection.cursor()
-        #Find the author of the command in the database using their user id from discord
-        cursor.execute(f"SELECT * FROM users WHERE id ={user_id}")
-        data = cursor.fetchone()
-        #If user is already in database, send user information
+        data = await conn.fetchrow(f'SELECT * FROM users WHERE id = {user_id}')
+
+        # If information is gathered, alert user that they are already part of the database
         if data != None:
-            print(data)
-            await ctx.send(data)
-        # If user isn't in database, add user to database and save changes
+            await ctx.send('You have already signed up. Please use `tinfo` to see what information you have currently stored in our database')
+        # If no information is found, enter user into database
         else:
-            cursor.execute(f"""INSERT INTO users (dis,id,start_date,phone,name)
+            await conn.execute(f"""INSERT INTO users (dis,id,start_date,phone,name)
                                VALUES({dis},{user_id}, NULL, NULL, '{name}');""")
-            connection.commit()
-            await ctx.send('You have been added')
+            await ctx.send('You have signed up for TrackIt!')
 
-    # Error handling
-    except (Exception, p.Error) as error:
-        print("Error while connecting to PostgreSQL", error)
-        await ctx.send('Sorry, having troubles connecting to the database')
-    # Once finished, close connection
+    except Exception as e:
+        print(e)
+        await ctx.send(f'Sorry, we\'re having problems processing your request')
+    
     finally:
-        if (connection):
-            cursor.close()
-            connection.close()
-            print("PostgreSQL connection is closed")
+        await conn.close()
 
 
-#Run bot loop
+# Recieve all information currently stored in database
+@bot.command()
+async def info(ctx):
+    # Gather user information for SQL query
+    user_id = ctx.author.id
+    conn = await apg.connect(user= USER, password= PASSWORD, host= HOST, port=PORT, database=DATABASE, ssl='require')
+
+    try:
+        # Try to find user in database
+        data = await conn.fetchrow(f'SELECT * FROM users WHERE id = {user_id}')
+        if data != None:
+            # Generate discord embed
+            embed = discord.Embed(title="User information", description="The information that is currently stored in the database")
+            embed.add_field(name='Discriminator', value=data[0], inline=False)
+            embed.add_field(name='User ID', value=data[1], inline=False)
+            embed.add_field(name='Start Date', value=data[2], inline=False)
+            embed.add_field(name='Phone Number', value=data[3], inline=False)
+            embed.add_field(name='Name', value=data[4], inline=False)
+            # DM embed to user
+            await ctx.author.send(embed=embed)
+
+    except Exception as e:
+        print(e)
+        await ctx.send(f'Sorry, we\'re having problems processing your request')
+
+    finally:
+        await conn.close()
+
+
+@bot.command()
+async def record(ctx):
+    # Gather user info for SQL query
+    user_id = ctx.author.id
+    conn = await apg.connect(user= USER, password= PASSWORD, host= HOST, port=PORT, database=DATABASE, ssl='require')
+
+    try:
+        # Update start_time in database with current time stamp
+        await conn.execute(f'''UPDATE users
+        SET start_date = CURRENT_TIMESTAMP 
+        WHERE id = {user_id};''')
+        # Alert the user that their info has been updated
+        await ctx.send(f'User start time has been updated to {dt.datetime.now()+dt.timedelta(hours=5)}')
+
+    except Exception as e:
+        print(e)
+        await ctx.send(f'Sorry, we\'re having problems processing your request')
+
+    finally:
+        await conn.close()
+
+
+@bot.command()
+async def delta(ctx):
+    # Collect user data for SQL query
+    user_id = ctx.author.id
+    current_time = dt.datetime.now() + dt.timedelta(hours=5)
+    conn = await apg.connect(user= USER, password= PASSWORD, host= HOST, port=PORT, database=DATABASE, ssl='require')
+
+    try:
+        # Find user information, set variable to start time and fix current time for UTC standard
+        data = await conn.fetchrow(f'SELECT * FROM users WHERE id= {user_id}')
+        start_time = data[2]
+        delta_time = current_time - start_time
+        print(delta_time)
+        await ctx.author.send(f'It has been {delta_time}. Keep it going!')
+
+    except Exception as e:
+        print(e)
+        await ctx.send(f'Sorry, we\'re having problems processing your request')
+
+    finally:
+        await conn.close()
+
+
+# Run discord bot loop
 bot.run(TOKEN)
